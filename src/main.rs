@@ -3,7 +3,7 @@ extern crate lazy_static;
 extern crate ropey;
 
 use regex::Regex;
-use std::io::{ BufRead, Write, BufReader, BufWriter, stdin, stdout, Error};
+use std::io::{stdin, stdout, BufRead, BufReader, BufWriter, Error, Write};
 
 use ropey::{Rope, RopeBuilder};
 
@@ -36,7 +36,7 @@ fn read_lines(mode: Mode, rd: &mut BufRead, wr: &mut Write) -> Result<Mode, Erro
     lazy_static! {
         static ref PUNKT: Regex = Regex::new(r"^\.\n").unwrap();
         static ref QUIT: Regex = Regex::new(r"^q\n").unwrap();
-        static ref APPEND: Regex = Regex::new(r"^(?P<line_num>\d+)|a\n").unwrap();
+        static ref APPEND: Regex = Regex::new(r"^(?P<line_num>\d+)?a\n").unwrap();
     }
 
     match mode {
@@ -51,15 +51,10 @@ fn read_lines(mode: Mode, rd: &mut BufRead, wr: &mut Write) -> Result<Mode, Erro
             if APPEND.is_match(&lines) {
                 let line_num = APPEND
                     .captures(&lines)
-                    .map(|cap|{
+                    .map(|cap| {
                         cap.name("line_num")
-                            .map(|cap|{
-                                cap.as_str()
-                            })
-                            .map(|num_str|{
-                                usize::from_str_radix(num_str, 10)
-                                    .unwrap_or(0)
-                            })
+                            .map(|cap| cap.as_str())
+                            .map(|num_str| usize::from_str_radix(num_str, 10).unwrap_or(0))
                     })
                     .unwrap_or(None);
                 return Ok(Mode::Input(state, line_num));
@@ -71,19 +66,18 @@ fn read_lines(mode: Mode, rd: &mut BufRead, wr: &mut Write) -> Result<Mode, Erro
             Ok(Mode::BadCommand(state))
         }
         Mode::Input(mut state, line_num) => {
-
             // If the line_num they're trying to append to is too large, immediately fail.
             if let Some(num) = line_num {
-                if num >= state.len_lines(){
+                if num >= state.len_lines() {
                     return Ok(Mode::BadCommand(state));
                 }
             }
 
             let mut builder = RopeBuilder::new();
-            loop{
+            loop {
                 let mut line = String::new();
                 rd.read_line(&mut line)?;
-                if PUNKT.is_match(&line){
+                if PUNKT.is_match(&line) {
                     break;
                 }
 
@@ -93,10 +87,10 @@ fn read_lines(mode: Mode, rd: &mut BufRead, wr: &mut Write) -> Result<Mode, Erro
             let lines_rope = builder.finish();
 
             match line_num {
-                Some(line_num) =>{
+                Some(line_num) => {
                     let idx = state.line_to_char(line_num);
                     state.insert(idx, &lines_rope.to_string());
-                },
+                }
                 None => {
                     state.append(lines_rope);
                 }
@@ -110,8 +104,8 @@ fn read_lines(mode: Mode, rd: &mut BufRead, wr: &mut Write) -> Result<Mode, Erro
 #[cfg(test)]
 mod test {
     use crate::*;
-    use std::io::BufReader;
     use ropey::Rope;
+    use std::io::BufReader;
 
     #[test]
     fn q_quits_simple() {
@@ -122,4 +116,16 @@ mod test {
         let result = read_lines(mode, &mut buf, &mut wr).unwrap();
         assert_eq!(result, Mode::Exit);
     }
+
+    fn print_at_current_cursor() {}
+
+    fn print_with_line_num_args() {}
+
+    fn unknown_command_writes_question_mark() {}
+
+    fn appends_to_end_with_no_line_num_args() {}
+
+    fn appends_to_correct_line_with_line_num_args() {}
+
+    fn does_not_append_when_only_line_args_no_a() {}
 }

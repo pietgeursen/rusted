@@ -1,42 +1,130 @@
 #[macro_use]
 extern crate lazy_static;
-extern crate ropey;
 
 use regex::Regex;
-use std::io::{stdin, stdout, BufRead, BufReader, BufWriter, Error, Write};
+use std::io::{stdin, stdout, BufRead, BufReader, Error, Write};
+use redux_bundler_rs::{State as ReduxState, Reactor, Bundle, Redux};
+use std::sync::Arc;
 
 use ropey::{Rope, RopeBuilder};
 
 #[derive(Debug, PartialEq)]
+struct State {
+    rope: Rope,
+    current_line: usize,
+}
+
+impl State {
+    pub fn new() -> State {
+        State {
+            rope: Rope::new(),
+            current_line: 0,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
 enum Mode {
-    Command(Rope),
-    BadCommand(Rope),
-    Input(Rope, Option<usize>),
+    Command(State),
+    BadCommand(State),
+    Print(State),
+    Input(State, usize),
     Exit,
-    ConfirmExit(Rope, bool),
+    ConfirmExit(State),
+}
+
+struct LineNumber(usize);
+
+enum Action{
+    AddInputLine(String),
+    StartInsertingInput(LineNumber),
+    StartAppendingInput(LineNumber),
+    Print,
+    ChangeToCommandMode,
+    Quit,
+    SetLineNumber(usize),
+}
+
+impl ReduxState for Mode{
+    type Action = Action;
+
+    fn apply(&mut self, action: &Self::Action) {
+        match action {
+            Action::StartAppending
+            Action::Quit => {
+                *self = Mode::Exit;
+            },
+            _ => ()
+        }
+    }
 }
 
 fn main() -> Result<(), Error> {
     let rd = stdin();
-    let mut wr = stdout();
+    let wr = stdout();
     let mut buf_rd = BufReader::new(rd);
 
-    let mut mode = Mode::Command(Rope::new());
-    loop {
-        mode = read_lines(mode, &mut buf_rd, &mut wr)?;
+    let mode = Mode::Command(State::new());
+    let print_reactor = Box::new(PrintReactor{writer: wr});
 
-        if mode == Mode::Exit {
+    let mut bundle = Bundle{
+        state: Arc::new(mode),
+        reactors: vec![print_reactor],
+        subscribers: vec![],
+    };
+
+    loop {
+        let mut command = String::new();
+        buf_rd.read_line(&mut command)?;
+
+        let action = create_action(&bundle.state, &command);
+
+        match action {
+            Some(action) => {
+                bundle.dispatch(&action)
+            },
+            None => {
+                //wr.write(b"?\n")?;
+            }
+        }
+        //mode = read_lines(mode, &mut buf_rd, &mut wr)?;
+
+        if *bundle.state == Mode::Exit {
             break;
         }
     }
     Ok(())
 }
 
-fn read_lines(mode: Mode, rd: &mut BufRead, wr: &mut Write) -> Result<Mode, Error> {
+fn create_action(mode: &Mode, command_string: &str) -> Option<Action>{
+
     lazy_static! {
         static ref PUNKT: Regex = Regex::new(r"^\.\n").unwrap();
         static ref QUIT: Regex = Regex::new(r"^q\n").unwrap();
+        static ref PRINT: Regex = Regex::new(r"^(?P<line_num>\d+)?p\n").unwrap();
         static ref APPEND: Regex = Regex::new(r"^(?P<line_num>\d+)?a\n").unwrap();
+    }
+
+    match mode{
+        Mode::Command(state) => {
+            if QUIT.is_match(command_string) {
+                Some(Action::Quit)
+            }else if PRINT.is_match(command_string){
+                Some(Action::Print)
+            }else if APPEND.is_match(command_string){
+                Some(Action::StartAppendingInput(LineNumber(0)))
+            }else{
+                None
+            }
+        },
+        _ => None 
+    }
+} 
+
+fn read_lines(mode: Mode, rd: &mut dyn BufRead, wr: &mut dyn Write) -> Result<Mode, Error> {
+    lazy_static! {
+        static ref PUNKT: Regex = Regex::new(r"^\.\n").unwrap();
+        static ref QUIT: Regex = Regex::new(r"^q\n").unwrap();
     }
 
     match mode {
@@ -45,34 +133,12 @@ fn read_lines(mode: Mode, rd: &mut BufRead, wr: &mut Write) -> Result<Mode, Erro
             return Ok(Mode::Command(state));
         }
         Mode::Command(state) => {
-            let mut lines = String::new();
-            rd.read_line(&mut lines)?;
+            let mut command = String::new();
+            rd.read_line(&mut command)?;
 
-            if APPEND.is_match(&lines) {
-                let line_num = APPEND
-                    .captures(&lines)
-                    .map(|cap| {
-                        cap.name("line_num")
-                            .map(|cap| cap.as_str())
-                            .map(|num_str| usize::from_str_radix(num_str, 10).unwrap_or(0))
-                    })
-                    .unwrap_or(None);
-                return Ok(Mode::Input(state, line_num));
-            }
-
-            if QUIT.is_match(&lines) {
-                return Ok(Mode::Exit);
-            }
-            Ok(Mode::BadCommand(state))
-        }
+            read_and_handle_commands(state, command, wr)
+        },
         Mode::Input(mut state, line_num) => {
-            // If the line_num they're trying to append to is too large, immediately fail.
-            if let Some(num) = line_num {
-                if num >= state.len_lines() {
-                    return Ok(Mode::BadCommand(state));
-                }
-            }
-
             let mut builder = RopeBuilder::new();
             loop {
                 let mut line = String::new();
@@ -86,20 +152,101 @@ fn read_lines(mode: Mode, rd: &mut BufRead, wr: &mut Write) -> Result<Mode, Erro
 
             let lines_rope = builder.finish();
 
-            match line_num {
-                Some(line_num) => {
-                    let idx = state.line_to_char(line_num);
-                    state.insert(idx, &lines_rope.to_string());
-                }
-                None => {
-                    state.append(lines_rope);
-                }
-            }
+            let idx = state.rope.line_to_char(line_num);
+            state.rope.insert(idx, &lines_rope.to_string());
+
+            state.current_line = line_num + lines_rope.len_lines() - 1;
             Ok(Mode::Command(state))
+        }
+        Mode::ConfirmExit(state) => {
+            wr.write(b"?\n")?;
+            let mut command = String::new();
+            rd.read_line(&mut command)?;
+
+            if QUIT.is_match(&command) {
+                return Ok(Mode::Exit);
+            }
+            read_and_handle_commands(state, command, wr)
         }
         _ => Ok(Mode::Exit),
     }
 }
+
+fn read_and_handle_commands(
+    state: State,
+    command: String,
+    wr: &mut dyn Write,
+) -> Result<Mode, Error> {
+
+    lazy_static! {
+        static ref QUIT: Regex = Regex::new(r"^q\n").unwrap();
+        static ref APPEND: Regex = Regex::new(r"^(?P<line_num>\d+)?a\n").unwrap();
+        static ref PRINT: Regex = Regex::new(r"^(?P<line_num>\d+)?p\n").unwrap();
+    }
+
+    if APPEND.is_match(&command) {
+        let line_num = APPEND
+            .captures(&command)
+            .and_then(|cap| {
+                cap.name("line_num")
+                    .map(|cap| cap.as_str())
+                    .map(|num_str| usize::from_str_radix(num_str, 10).unwrap_or(0))
+            })
+            .unwrap_or(state.current_line);
+
+        // If the line_num they're trying to append to is too large, immediately fail.
+        if line_num >= state.rope.len_lines() {
+            return Ok(Mode::BadCommand(state));
+        }
+
+        return Ok(Mode::Input(state, line_num));
+    }
+
+    if PRINT.is_match(&command) {
+        let line_num = PRINT
+            .captures(&command)
+            .and_then(|cap| {
+                cap.name("line_num")
+                    .map(|cap| cap.as_str())
+                    .map(|num_str| usize::from_str_radix(num_str, 10).unwrap_or(0))
+            })
+            .unwrap_or(state.current_line);
+
+        // If the line_num they're trying to print to is too large, immediately fail.
+        if line_num >= state.rope.len_lines() {
+            return Ok(Mode::BadCommand(state));
+        }
+
+        let chunks = state.rope.line(line_num - 1).chunks();
+        for chunk in chunks {
+            wr.write_all(chunk.as_bytes())?;
+        }
+
+        return Ok(Mode::Command(state));
+    }
+
+    if QUIT.is_match(&command) {
+        return Ok(Mode::ConfirmExit(state));
+    }
+    Ok(Mode::BadCommand(state))
+}
+
+struct PrintReactor<W: Write>{
+    writer: W
+}
+
+impl<W: Write> Reactor<Mode> for PrintReactor<W>{
+    fn apply(&mut self, state: &Mode) -> Option<Action>{
+        match state {
+            Mode::Print(state) => {
+                state.rope.write_to(&mut self.writer).expect("unable to write to writer");
+                Some(Action::ChangeToCommandMode)
+            }
+            _ => None
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod test {

@@ -11,5 +11,7 @@ panic = 'abort'
 
 [dependencies]
 lazy_static = "1.3.0"
+#redux-bundler-rs = {git="https://github.com/pietgeursen/redux_bundler_rs"}
+redux-bundler-rs = {path="../redux_bundler_rs"}
 regex = "1"
 ropey = "1.0.0"

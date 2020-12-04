@@ -10,8 +10,14 @@ codegen-units = 1
 panic = 'abort'
 
 [dependencies]
+futures = "0.3.8"
+futures-lite = "1.11.2"
+inu-rs = {path = "../inu-rs"}
 lazy_static = "1.3.0"
+log = "0.4.11"
+pretty_env_logger = "0.4.0"
 #redux-bundler-rs = {git="https://github.com/pietgeursen/redux_bundler_rs"}
-redux-bundler-rs = {path="../redux_bundler_rs"}
+#redux-bundler-rs = {path="../redux_bundler_rs"}
 regex = "1"
 ropey = "1.0.0"
+smol = "1.2.5"

@@ -3,10 +3,9 @@ extern crate lazy_static;
 
 use futures::channel::mpsc::unbounded;
 use futures::io::BufReader;
-use futures::io::BufWriter;
 use futures::lock::Mutex;
 use futures::prelude::*;
-use log::debug;
+use log::trace;
 use std::io::stdout;
 use std::sync::Arc;
 
@@ -86,7 +85,7 @@ async fn map_line_to_action(
         static ref APPEND: Regex = Regex::new(r"^(?P<line_num>\d+)?a\n$").unwrap();
     }
 
-    debug!("INPUT LINE: {:?}", line);
+    trace!("INPUT LINE: {:?}", line);
     let state = handle.get_state().await;
 
     match state {

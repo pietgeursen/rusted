@@ -1,8 +1,9 @@
 use ropey::Rope;
 use std::sync::Arc;
+use std::fmt;
 use futures::channel::mpsc::UnboundedSender;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct InternalState {
     pub rope: Arc<Rope>,
     pub current_line: usize,
@@ -16,6 +17,15 @@ impl InternalState {
             current_line: 0,
             output_writer
         }
+    }
+}
+
+impl fmt::Debug for InternalState{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Point")
+         .field("rope", &self.rope)
+         .field("current_line", &self.current_line)
+         .finish()
     }
 }
 

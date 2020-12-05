@@ -72,27 +72,17 @@ impl InuState for Mode {
             Mode::Command(state) => match effect {
                 Effect::Print => {
                     let state = state.clone();
-                    Box::pin(async {
-                        if let Some(writer) = state.output_writer{
+                    let strm = async {
+                        if let Some(mut writer) = state.output_writer{
                             let mut buff = vec![];
                             state.rope.write_to(&mut buff).unwrap();
-                            let mut writer = writer.clone();
                             writer.send(buff).await.unwrap();
                         }
                         None
-                    }.into_stream())
+                    }.into_stream();
+
+                    Box::pin(strm)
                 }
-//                Effect::Print => state
-//                    .output_writer
-//                    .as_ref()
-//                    .map(|writer| {
-//                        let strm = async move {
-//                            None
-//                        }
-//                        .into_stream();
-//                        Box::pin(strm)
-//                    })
-//                    .unwrap_or_else(|| Box::pin(async { None }.into_stream())),
             },
             _ => Box::pin(stream::empty()),
         }

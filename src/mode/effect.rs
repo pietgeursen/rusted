@@ -1,2 +1,7 @@
+use std::ops::Range;
+
 #[derive(Clone, Debug)]
-pub enum Effect {}
+pub enum Effect {
+    //Print(Range<usize>)
+    Print
+}

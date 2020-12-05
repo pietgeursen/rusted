@@ -1,9 +1,14 @@
 #[macro_use]
 extern crate lazy_static;
 
+use futures::channel::mpsc::unbounded;
 use futures::io::BufReader;
+use futures::io::BufWriter;
+use futures::lock::Mutex;
 use futures::prelude::*;
 use log::debug;
+use std::io::stdout;
+use std::sync::Arc;
 
 use inu_rs::*;
 use regex::Regex;
@@ -17,10 +22,13 @@ fn main() -> Result<(), Error> {
     pretty_env_logger::init_timed();
 
     smol::block_on(async {
-        let initial_state = Mode::Command(InternalState::new());
+        // Set up our inu state manager.
+        let (output_sender, output_receiver) = unbounded();
+        let initial_state = Mode::Command(InternalState::new(Some(output_sender)));
         let mut inu = Inu::new(initial_state);
 
-        let handle = inu.get_handle();
+        // Set up a future that will resolve when the state is Mode::Exit so that we can exit the
+        // program.
         let quitter = inu
             .subscribe()
             .await
@@ -29,28 +37,38 @@ fn main() -> Result<(), Error> {
 
                 future::ready(is_exit)
             })
-            .into_future()
-            .then(|_| handle.stop());
+            .into_future();
 
+        // Handle the stream of output and write it to std out.
+        let wr = Unblock::new(stdout());
+        let buf_wr = Arc::new(Mutex::new(wr));
+        let output_writer = output_receiver
+            .map(|lines| (lines, buf_wr.clone()))
+            .for_each(|(lines, buf_wr)| async move {
+                let mut buf_wr = buf_wr.lock().await;
+                buf_wr.write_all(&lines).await.unwrap();
+            });
+
+        // Set up a stream that maps from lines of input on stdin into actions + effects.
         let handle = inu.get_handle();
-        let input_dispatcher = smol::spawn(async move {
-            let rd = Unblock::new(stdin());
-            let buf_rd = BufReader::new(rd);
+        let rd = Unblock::new(stdin());
+        let buf_rd = BufReader::new(rd);
+        let input_dispatcher = buf_rd
+            .lines()
+            .map(|line| line.unwrap() + "\n") // Put the newlines back on.
+            .map(|line| (line, handle.clone()))
+            .filter_map(map_line_to_action)
+            .for_each(|(action, effect, mut handle)| async move {
+                handle.dispatch(action, effect).await.unwrap();
+            });
 
-            buf_rd
-                .lines()
-                .map(|line| line.unwrap() + "\n") // Put the newlines back on.
-                .map(move |line| (line, handle.clone()))
-                .filter_map(map_line_to_action)
-                .for_each(|(action, mut handle)| async move {
-                    handle.dispatch(Some(action), None).await.unwrap();
-                })
-                .await
-        });
-
+        // select! will resolve when one of these futures resolves, which will only ever be the
+        // quitter, the others never end but we still need to include them in the select so that
+        // the futures do get polled and driven by the event loop.
         futures::select! {
             _ = inu.run().fuse() => (),
             _ = input_dispatcher.fuse() => (),
+            _ = output_writer.fuse() => (),
             _ = quitter.fuse() => ()
         };
 
@@ -60,7 +78,7 @@ fn main() -> Result<(), Error> {
 
 async fn map_line_to_action(
     (line, handle): (String, Handle<Mode>),
-) -> Option<(Action, Handle<Mode>)> {
+) -> Option<(Option<Action>, Option<Effect>, Handle<Mode>)> {
     lazy_static! {
         static ref PUNKT: Regex = Regex::new(r"^\.\n$").unwrap();
         static ref QUIT: Regex = Regex::new(r"^q\n$").unwrap();
@@ -69,26 +87,29 @@ async fn map_line_to_action(
     }
 
     debug!("INPUT LINE: {:?}", line);
-    let state = handle.get_state().await.await.unwrap();
+    let state = handle.get_state().await;
 
     match state {
         Mode::Command(state) => {
             if QUIT.is_match(&line) {
-                Some((Action::Quit, handle))
+                Some((Some(Action::Quit), None, handle))
             } else if APPEND.is_match(&line) {
                 Some((
-                    Action::StartAppendingInput(LineNumber(state.current_line)),
+                    Some(Action::StartAppendingInput(LineNumber(state.current_line))),
+                    None,
                     handle,
                 ))
+            } else if PRINT.is_match(&line) {
+                Some((None, Some(Effect::Print), handle))
             } else {
                 None
             }
         }
         Mode::Input(_, _) => {
             if PUNKT.is_match(&line) {
-                Some((Action::ChangeToCommandMode, handle))
+                Some((Some(Action::ChangeToCommandMode), None, handle))
             } else {
-                Some((Action::AddInputLine(line), handle))
+                Some((Some(Action::AddInputLine(line)), None, handle))
             }
         }
         _ => None,

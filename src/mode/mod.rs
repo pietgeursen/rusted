@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use ropey::Rope;
-use std::pin::Pin;
+use futures::prelude::*;
 use inu_rs::State as InuState;
 use log::debug;
-use futures::prelude::*;
+use ropey::Rope;
+use std::pin::Pin;
+use std::sync::Arc;
 
 mod action;
 mod effect;
@@ -11,7 +11,7 @@ mod internal_state;
 
 pub use action::{Action, LineNumber};
 pub use effect::Effect;
-pub use internal_state::{InternalState, InputLinesToAdd};
+pub use internal_state::{InputLinesToAdd, InternalState};
 
 #[derive(Debug, Clone)]
 pub enum Mode {
@@ -62,7 +62,39 @@ impl InuState for Mode {
 
         debug!("NEW STATE: {:?}", self);
     }
-    fn apply_effect(&self, _effect: &Self::Effect) -> Pin<Box<dyn Stream<Item = Self::Action>>> {
-        Box::pin(stream::empty())
+
+    fn apply_effect(
+        &self,
+        effect: &Self::Effect,
+    ) -> Pin<Box<dyn Stream<Item = Option<Self::Action>>>> {
+        debug!("EFFECT: {:?}, CURRENT STATE: {:?}", effect, self);
+        match self {
+            Mode::Command(state) => match effect {
+                Effect::Print => {
+                    let state = state.clone();
+                    Box::pin(async {
+                        if let Some(writer) = state.output_writer{
+                            let mut buff = vec![];
+                            state.rope.write_to(&mut buff).unwrap();
+                            let mut writer = writer.clone();
+                            writer.send(buff).await.unwrap();
+                        }
+                        None
+                    }.into_stream())
+                }
+//                Effect::Print => state
+//                    .output_writer
+//                    .as_ref()
+//                    .map(|writer| {
+//                        let strm = async move {
+//                            None
+//                        }
+//                        .into_stream();
+//                        Box::pin(strm)
+//                    })
+//                    .unwrap_or_else(|| Box::pin(async { None }.into_stream())),
+            },
+            _ => Box::pin(stream::empty()),
+        }
     }
 }

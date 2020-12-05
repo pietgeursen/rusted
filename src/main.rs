@@ -5,119 +5,19 @@ use futures::io::BufReader;
 use futures::prelude::*;
 use log::debug;
 
-//use futures_lite::io::{AsyncBufReadExt, BufReader};
-//use futures_lite::stream::StreamExt;
-use inu_rs::State as InuState;
 use inu_rs::*;
 use regex::Regex;
 use smol::Unblock;
-use std::io::{stdin, stdout, Error};
-use std::pin::Pin;
-use std::sync::Arc;
+use std::io::{stdin, Error};
 
-use ropey::Rope;
-
-#[derive(Debug, Clone)]
-struct State {
-    rope: Arc<Rope>,
-    current_line: usize,
-}
-
-impl State {
-    pub fn new() -> State {
-        State {
-            rope: Arc::new(Rope::new()),
-            current_line: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-enum Mode {
-    Command(State),
-    //    Print(State),
-    Input(State), // TODO this could also contain the lines to add, and then they can all be added at once for efficiency.
-    Exit,
-    ConfirmExit(State),
-}
-
-#[derive(Clone, Debug)]
-struct LineNumber(usize);
-
-#[derive(Clone, Debug)]
-enum Action {
-    AddInputLine(String),
-    StartInsertingInput(LineNumber),
-    StartAppendingInput(LineNumber),
-    ChangeToCommandMode,
-    Quit,
-    SetLineNumber(usize),
-}
-
-#[derive(Clone, Debug)]
-enum Effect {}
-
-impl InuState for Mode {
-    type Action = Action;
-    type Effect = Effect;
-
-    fn apply_action(&mut self, action: &Self::Action) {
-        debug!("ACTION: {:?}, CURRENT STATE: {:?}", action, self);
-
-        match self {
-            Mode::Command(state) => match action {
-                Action::StartAppendingInput(line_number) => {
-                    state.current_line = line_number.0;
-                    *self = Mode::Input(state.clone());
-                }
-                Action::Quit => *self = Mode::Exit,
-                _ => (),
-            },
-            Mode::Input(state) => match action {
-                Action::AddInputLine(line) => {
-                    let idx = state.rope.line_to_char(state.current_line);
-                    Arc::<Rope>::get_mut(&mut state.rope)
-                        .unwrap()
-                        .insert(idx, line);
-                    state.current_line += 1;
-                }
-                Action::ChangeToCommandMode => *self = Mode::Command(state.clone()),
-                _ => (),
-            },
-            Mode::ConfirmExit(_state) => match action {
-                Action::Quit => *self = Mode::Exit,
-                _ => (),
-            },
-            _ => (),
-        };
-
-        debug!("NEW STATE: {:?}", self);
-    }
-    fn apply_effect(&self, _effect: &Self::Effect) -> Pin<Box<dyn Stream<Item = Self::Action>>> {
-        Box::pin(stream::empty())
-    }
-    //    fn apply(&mut self, action: &Self::Action) {
-    //        *self = match self{
-    //            Mode::Command(state) => {
-    //                match action {
-    //                    Action::StartAppendingInput(line_number) => {
-    //                        Mode::Input(*state, line_number.0)
-    //                    },
-    //                    Action::Quit => {
-    //                        Mode::Exit
-    //                    },
-    //                    _ => Mode::BadCommand(*state)
-    //                }
-    //            }
-    //        }
-    //    }
-}
+mod mode;
+use mode::*;
 
 fn main() -> Result<(), Error> {
     pretty_env_logger::init_timed();
 
     smol::block_on(async {
-        let initial_state = Mode::Command(State::new());
+        let initial_state = Mode::Command(InternalState::new());
         let mut inu = Inu::new(initial_state);
 
         let handle = inu.get_handle();
@@ -133,15 +33,7 @@ fn main() -> Result<(), Error> {
             .then(|_| handle.stop());
 
         let handle = inu.get_handle();
-
         let input_dispatcher = smol::spawn(async move {
-            lazy_static! {
-                static ref PUNKT: Regex = Regex::new(r"^\.\n$").unwrap();
-                static ref QUIT: Regex = Regex::new(r"^q\n$").unwrap();
-                static ref PRINT: Regex = Regex::new(r"^(?P<line_num>\d+)?p\n$").unwrap();
-                static ref APPEND: Regex = Regex::new(r"^(?P<line_num>\d+)?a\n$").unwrap();
-            }
-
             let rd = Unblock::new(stdin());
             let buf_rd = BufReader::new(rd);
 
@@ -149,33 +41,7 @@ fn main() -> Result<(), Error> {
                 .lines()
                 .map(|line| line.unwrap() + "\n") // Put the newlines back on.
                 .map(move |line| (line, handle.clone()))
-                .filter_map(|(line, handle)| async move {
-                    debug!("INPUT LINE: {:?}", line);
-                    let state = handle.get_state().await.await.unwrap();
-
-                    match state {
-                        Mode::Command(state) => {
-                            if QUIT.is_match(&line) {
-                                Some((Action::Quit, handle))
-                            } else if APPEND.is_match(&line) {
-                                Some((
-                                    Action::StartAppendingInput(LineNumber(state.current_line)),
-                                    handle,
-                                ))
-                            } else {
-                                None
-                            }
-                        }
-                        Mode::Input(_) => {
-                            if PUNKT.is_match(&line) {
-                                Some((Action::ChangeToCommandMode, handle))
-                            } else {
-                                Some((Action::AddInputLine(line), handle))
-                            }
-                        }
-                        _ => None,
-                    }
-                })
+                .filter_map(map_line_to_action)
                 .for_each(|(action, mut handle)| async move {
                     handle.dispatch(Some(action), None).await.unwrap();
                 })
@@ -186,117 +52,48 @@ fn main() -> Result<(), Error> {
             _ = inu.run().fuse() => (),
             _ = input_dispatcher.fuse() => (),
             _ = quitter.fuse() => ()
-
         };
 
         Ok(())
     })
-
-    //    let rd = stdin();
-    //    let wr = stdout();
-    //    let mut buf_rd = BufReader::new(rd);
-    //
-    //
-    //    let mut inu = Inu::new(mode);
-    //    let inu_handle = inu.get_handle();
-    //
-    //    loop {
-    //        let mut command = String::new();
-    //        buf_rd.read_line(&mut command)?;
-    //
-    //        let action = create_action(&bundle.state, &command);
-    //
-    //        match action {
-    //            Some(action) => {
-    //                bundle.dispatch(&action)
-    //            },
-    //            None => {
-    //                //wr.write(b"?\n")?;
-    //            }
-    //        }
-    //        //mode = read_lines(mode, &mut buf_rd, &mut wr)?;
-    //
-    //        if *bundle.state == Mode::Exit {
-    //            break;
-    //        }
-    //    }
-    //    Ok(())
 }
 
-//fn create_action(mode: &Mode, command_string: &str) -> Option<Action> {
-//    lazy_static! {
-//        static ref PUNKT: Regex = Regex::new(r"^\.\n").unwrap();
-//        static ref QUIT: Regex = Regex::new(r"^q\n").unwrap();
-//        static ref PRINT: Regex = Regex::new(r"^(?P<line_num>\d+)?p\n").unwrap();
-//        static ref APPEND: Regex = Regex::new(r"^(?P<line_num>\d+)?a\n").unwrap();
-//    }
-//
-//    match mode {
-//        Mode::Command(state) => {
-//            if QUIT.is_match(command_string) {
-//                Some(Action::Quit)
-//            } else if PRINT.is_match(command_string) {
-//                None //Some(Action::Print)
-//            } else if APPEND.is_match(command_string) {
-//                Some(Action::StartAppendingInput(LineNumber(0)))
-//            } else {
-//                None
-//            }
-//        }
-//        _ => None,
-//    }
-//}
+async fn map_line_to_action(
+    (line, handle): (String, Handle<Mode>),
+) -> Option<(Action, Handle<Mode>)> {
+    lazy_static! {
+        static ref PUNKT: Regex = Regex::new(r"^\.\n$").unwrap();
+        static ref QUIT: Regex = Regex::new(r"^q\n$").unwrap();
+        static ref PRINT: Regex = Regex::new(r"^(?P<line_num>\d+)?p\n$").unwrap();
+        static ref APPEND: Regex = Regex::new(r"^(?P<line_num>\d+)?a\n$").unwrap();
+    }
 
-//fn read_lines(mode: Mode, rd: &mut dyn BufRead, wr: &mut dyn Write) -> Result<Mode, Error> {
-//    lazy_static! {
-//        static ref PUNKT: Regex = Regex::new(r"^\.\n").unwrap();
-//        static ref QUIT: Regex = Regex::new(r"^q\n").unwrap();
-//    }
-//
-//    match mode {
-//        Mode::BadCommand(state) => {
-//            wr.write(b"?\n")?;
-//            return Ok(Mode::Command(state));
-//        }
-//        Mode::Command(state) => {
-//            let mut command = String::new();
-//            rd.read_line(&mut command)?;
-//
-//            read_and_handle_commands(state, command, wr)
-//        }
-//        Mode::Input(mut state) => {
-//            let mut builder = RopeBuilder::new();
-//            loop {
-//                let mut line = String::new();
-//                rd.read_line(&mut line)?;
-//                if PUNKT.is_match(&line) {
-//                    break;
-//                }
-//
-//                builder.append(&line);
-//            }
-//
-//            let lines_rope = builder.finish();
-//
-//            let idx = state.rope.line_to_char(line_num);
-//            //state.rope.insert(idx, &lines_rope.to_string());
-//
-//            state.current_line = line_num + lines_rope.len_lines() - 1;
-//            Ok(Mode::Command(state))
-//        }
-//        Mode::ConfirmExit(state) => {
-//            wr.write(b"?\n")?;
-//            let mut command = String::new();
-//            rd.read_line(&mut command)?;
-//
-//            if QUIT.is_match(&command) {
-//                return Ok(Mode::Exit);
-//            }
-//            read_and_handle_commands(state, command, wr)
-//        }
-//        _ => Ok(Mode::Exit),
-//    }
-//}
+    debug!("INPUT LINE: {:?}", line);
+    let state = handle.get_state().await.await.unwrap();
+
+    match state {
+        Mode::Command(state) => {
+            if QUIT.is_match(&line) {
+                Some((Action::Quit, handle))
+            } else if APPEND.is_match(&line) {
+                Some((
+                    Action::StartAppendingInput(LineNumber(state.current_line)),
+                    handle,
+                ))
+            } else {
+                None
+            }
+        }
+        Mode::Input(_, _) => {
+            if PUNKT.is_match(&line) {
+                Some((Action::ChangeToCommandMode, handle))
+            } else {
+                Some((Action::AddInputLine(line), handle))
+            }
+        }
+        _ => None,
+    }
+}
 
 //fn read_and_handle_commands(
 //    state: State,

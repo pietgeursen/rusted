@@ -10,6 +10,7 @@ codegen-units = 1
 panic = 'abort'
 
 [dependencies]
+crosstermion = {version = "0.5.0", features = ["termion", "tui", "tui-termion", "input-async"]}
 futures = "0.3.8"
 futures-lite = "1.11.2"
 inu-rs = {path = "../inu-rs"}
@@ -21,3 +22,4 @@ pretty_env_logger = "0.4.0"
 regex = "1"
 ropey = "1.0.0"
 smol = "1.2.5"
+termion = "1.5"

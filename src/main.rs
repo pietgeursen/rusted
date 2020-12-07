@@ -1,29 +1,26 @@
 #[macro_use]
 extern crate lazy_static;
 
-use futures::channel::mpsc::unbounded;
-use futures::io::BufReader;
-use futures::lock::Mutex;
+use crosstermion::input::Key;
 use futures::prelude::*;
+use inu_rs::Handle;
+use inu_rs::Inu;
 use log::trace;
-use std::io::stdout;
-use std::sync::Arc;
-
-use inu_rs::*;
 use regex::Regex;
-use smol::Unblock;
-use std::io::{stdin, Error};
+use smol::spawn;
+use std::io::Error;
 
 mod mode;
+mod ui;
 use mode::*;
+use ui::create_ui;
 
 fn main() -> Result<(), Error> {
     pretty_env_logger::init_timed();
 
     smol::block_on(async {
         // Set up our inu state manager.
-        let (output_sender, output_receiver) = unbounded();
-        let initial_state = Mode::Command(InternalState::new(Some(output_sender)));
+        let initial_state = State::default();
         let mut inu = Inu::new(initial_state);
 
         // Set up a future that will resolve when the state is Mode::Exit so that we can exit the
@@ -32,29 +29,37 @@ fn main() -> Result<(), Error> {
             .subscribe()
             .await
             .filter(|state| {
-                let is_exit = if let Mode::Exit = state { true } else { false };
+                let is_exit = if let Mode::Exit = state.mode {
+                    true
+                } else {
+                    false
+                };
 
                 future::ready(is_exit)
             })
             .into_future();
 
-        // Handle the stream of output and write it to std out.
-        let wr = Unblock::new(stdout());
-        let buf_wr = Arc::new(Mutex::new(wr));
-        let output_writer = output_receiver
-            .map(|lines| (lines, buf_wr.clone()))
-            .for_each(|(lines, buf_wr)| async move {
-                let mut buf_wr = buf_wr.lock().await;
-                buf_wr.write_all(&lines).await.unwrap();
-            });
-
-        // Set up a stream that maps from lines of input on stdin into actions + effects.
+        // Set up the ui. Runs in another thread.
+        let (ui_sender, ui_input_receiver) = create_ui().unwrap();
         let handle = inu.get_handle();
-        let rd = Unblock::new(stdin());
-        let buf_rd = BufReader::new(rd);
-        let input_dispatcher = buf_rd
-            .lines()
-            .map(|line| line.unwrap() + "\n") // Put the newlines back on.
+        let sender = ui_sender.clone();
+
+        // Render the initial state.
+        // We need to detach here. The handle can't get the state until inu is running.
+        spawn(async move {
+            let mode = handle.get_state().await;
+            sender.send(mode).unwrap();
+        })
+        .detach();
+
+        // Subscribe to changes in state and send them to the ui for rendering
+        let ui = inu.subscribe().await.for_each(|mode| async {
+            ui_sender.send(mode).unwrap();
+        });
+
+        // Set up a stream that maps from key events to actions
+        let handle = inu.get_handle();
+        let input_dispatcher = ui_input_receiver
             .map(|line| (line, handle.clone()))
             .filter_map(map_line_to_action)
             .for_each(|(action, effect, mut handle)| async move {
@@ -67,7 +72,7 @@ fn main() -> Result<(), Error> {
         futures::select! {
             _ = inu.run().fuse() => (),
             _ = input_dispatcher.fuse() => (),
-            _ = output_writer.fuse() => (),
+            _ = ui.fuse() => (),
             _ = quitter.fuse() => ()
         };
 
@@ -76,40 +81,73 @@ fn main() -> Result<(), Error> {
 }
 
 async fn map_line_to_action(
-    (line, handle): (String, Handle<Mode>),
-) -> Option<(Option<Action>, Option<Effect>, Handle<Mode>)> {
+    (key, handle): (Key, Handle<State>),
+) -> Option<(Option<Action>, Option<Effect>, Handle<State>)> {
     lazy_static! {
         static ref PUNKT: Regex = Regex::new(r"^\.\n$").unwrap();
-        static ref QUIT: Regex = Regex::new(r"^q\n$").unwrap();
+        static ref QUIT: Regex = Regex::new(r"^q!$").unwrap();
         static ref PRINT: Regex = Regex::new(r"^(?P<line_num>\d+)?p\n$").unwrap();
         static ref APPEND: Regex = Regex::new(r"^(?P<line_num>\d+)?a\n$").unwrap();
     }
 
-    trace!("INPUT LINE: {:?}", line);
+    trace!("INPUT LINE: {:?}", key);
     let state = handle.get_state().await;
 
-    match state {
-        Mode::Command(state) => {
-            if QUIT.is_match(&line) {
-                Some((Some(Action::Quit), None, handle))
-            } else if APPEND.is_match(&line) {
-                Some((
+    match state.mode {
+        Mode::Normal => {
+            match key {
+                Key::Char('a') => Some((
                     Some(Action::StartAppendingInput(LineNumber(state.current_line))),
                     None,
                     handle,
-                ))
-            } else if PRINT.is_match(&line) {
-                Some((None, Some(Effect::Print), handle))
-            } else {
-                None
+                )),
+                Key::Char('i') => Some((
+                    Some(Action::StartInsertingInput(LineNumber(state.current_line))),
+                    None,
+                    handle,
+                )),
+                Key::Char(':') => Some((Some(Action::ChangeToCommandMode), None, handle)),
+                _ => None,
+            }
+            //            if QUIT.is_match(&line) {
+            //                Some((Some(Action::Quit), None, handle))
+            //            } else if APPEND.is_match(&line) {
+            //                Some((
+            //                    Some(Action::StartAppendingInput(LineNumber(state.current_line))),
+            //                    None,
+            //                    handle,
+            //                ))
+            //            } else if PRINT.is_match(&line) {
+            //                Some((None, Some(Effect::Print), handle))
+            //            } else {
+            //                None
+            //            }
+        }
+        Mode::Command(sofar) => {
+            match key {
+                Key::Esc => Some((Some(Action::ChangeToNormalMode), None, handle)),
+                Key::Char('\n') => {
+                    //TODO
+                    if QUIT.is_match(&sofar) {
+                        return Some((Some(Action::Quit), None, handle));
+                    }
+                    Some((Some(Action::ChangeToNormalMode), None, handle))
+                }
+                Key::Char(c) => Some((Some(Action::AddChar(c.into())), None, handle)),
+                _ => None,
             }
         }
-        Mode::Input(_, _) => {
-            if PUNKT.is_match(&line) {
-                Some((Some(Action::ChangeToCommandMode), None, handle))
-            } else {
-                Some((Some(Action::AddInputLine(line)), None, handle))
+        Mode::Input => {
+            match key {
+                Key::Char(c) => Some((Some(Action::AddChar(c.into())), None, handle)),
+                Key::Esc => Some((Some(Action::ChangeToNormalMode), None, handle)),
+                _ => None,
             }
+            //            if PUNKT.is_match(&line) {
+            //                Some((Some(Action::ChangeToNormalMode), None, handle))
+            //            } else {
+            //                Some((Some(Action::AddInputLine(line)), None, handle))
+            //            }
         }
         _ => None,
     }
@@ -138,7 +176,7 @@ async fn map_line_to_action(
 //
 //        // If the line_num they're trying to append to is too large, immediately fail.
 //        if line_num >= state.rope.len_lines() {
-//            return Ok(Mode::BadCommand(state));
+//            return Ok(Mode::BadNormal(state));
 //        }
 //
 //        return Ok(Mode::Input(state));
@@ -156,7 +194,7 @@ async fn map_line_to_action(
 //
 //        // If the line_num they're trying to print to is too large, immediately fail.
 //        if line_num >= state.rope.len_lines() {
-//            return Ok(Mode::BadCommand(state));
+//            return Ok(Mode::BadNormal(state));
 //        }
 //
 //        let chunks = state.rope.line(line_num - 1).chunks();
@@ -164,14 +202,14 @@ async fn map_line_to_action(
 //            wr.write_all(chunk.as_bytes())?;
 //        }
 //
-//        return Ok(Mode::Command(state));
+//        return Ok(Mode::Normal(state));
 //    }
 //
 //    if QUIT.is_match(&command) {
 //        //return Ok(Mode::ConfirmExit(state));
 //        return Ok(Mode::Exit);
 //    }
-//    Ok(Mode::BadCommand(state))
+//    Ok(Mode::BadNormal(state))
 //}
 
 //struct PrintReactor<W: Write>{
@@ -183,7 +221,7 @@ async fn map_line_to_action(
 //        match state {
 //            Mode::Print(state) => {
 //                state.rope.write_to(&mut self.writer).expect("unable to write to writer");
-//                Some(Action::ChangeToCommandMode)
+//                Some(Action::ChangeToNormalMode)
 //            }
 //            _ => None
 //        }
@@ -198,7 +236,7 @@ mod test {
 
     #[test]
     fn q_quits_simple() {
-        let mode = Mode::Command(Rope::new());
+        let mode = Mode::Normal(Rope::new());
         let chars = "q\n";
         let mut buf = BufReader::new(chars.as_bytes());
         let mut wr = BufWriter::new(Vec::new());

@@ -3,58 +3,85 @@ use inu_rs::State as InuState;
 use log::debug;
 use ropey::Rope;
 use std::pin::Pin;
-use std::sync::Arc;
 
 mod action;
 mod effect;
-mod internal_state;
 
 pub use action::{Action, LineNumber};
 pub use effect::Effect;
-pub use internal_state::{InputLinesToAdd, InternalState};
 
 #[derive(Debug, Clone)]
 pub enum Mode {
-    Command(InternalState),
-    //    Print(State),
-    Input(InternalState, InputLinesToAdd), // TODO this could also contain the lines to add, and then they can all be added at once for efficiency.
+    Normal,
+    Command(String),
+    Input,
     Exit,
-    ConfirmExit(InternalState),
+    ConfirmExit,
 }
 
-impl InuState for Mode {
+impl Default for Mode {
+    fn default() -> Self{
+        Mode::Normal
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct State {
+    pub mode: Mode,
+    pub current_line: usize,
+    pub current_cursor_indent: usize,
+    pub rope: Rope,
+}
+
+impl State {
+    pub fn get_entire_rope(&self) -> String {
+        self.rope.chunks().collect()
+    }
+}
+
+impl InuState for State {
     type Action = Action;
     type Effect = Effect;
 
     fn apply_action(&mut self, action: &Self::Action) {
         debug!("ACTION: {:?}, CURRENT STATE: {:?}", action, self);
 
-        match self {
-            Mode::Command(state) => match action {
+        match &self.mode {
+            Mode::Normal => match action {
                 Action::StartAppendingInput(line_number) => {
-                    state.current_line = line_number.0;
-                    *self = Mode::Input(state.clone(), InputLinesToAdd::default());
-                }
-                Action::Quit => *self = Mode::Exit,
-                _ => (),
-            },
-            Mode::Input(state, lines_to_add) => match action {
-                Action::AddInputLine(line) => {
-                    lines_to_add.lines.push_str(&line);
-                    lines_to_add.num_lines += 1;
+                    self.current_line = line_number.0;
+                    self.mode = Mode::Input;
                 }
                 Action::ChangeToCommandMode => {
-                    let idx = state.rope.line_to_char(state.current_line);
-                    Arc::<Rope>::get_mut(&mut state.rope)
-                        .unwrap()
-                        .insert(idx, &lines_to_add.lines);
-                    state.current_line += lines_to_add.num_lines;
-                    *self = Mode::Command(state.clone())
+                    self.mode = Mode::Command(String::new());
                 }
                 _ => (),
             },
-            Mode::ConfirmExit(_state) => match action {
-                Action::Quit => *self = Mode::Exit,
+            Mode::Input => match action {
+                Action::AddChar(chr) => {
+                    let idx =
+                        self.rope.line_to_char(self.current_line) + self.current_cursor_indent;
+                    self.rope.insert(idx, &chr);
+                    self.current_cursor_indent += 1;
+                }
+                Action::ChangeToNormalMode => {
+                    //state.current_line += lines_to_add.num_lines;
+                    self.mode = Mode::Normal
+                }
+                _ => (),
+            },
+            Mode::Command(chars) => match action {
+                Action::Quit => self.mode = Mode::Exit,
+                Action::AddChar(chr) => {
+                    let mut new_chars = chars.to_string();
+                    new_chars.push_str(&chr);
+                    self.mode = Mode::Command(new_chars)
+                }
+                Action::ChangeToNormalMode => self.mode = Mode::Normal,
+                _ => (),
+            },
+            Mode::ConfirmExit => match action {
+                Action::Quit => self.mode = Mode::Exit,
                 _ => (),
             },
             _ => (),
@@ -68,23 +95,6 @@ impl InuState for Mode {
         effect: &Self::Effect,
     ) -> Pin<Box<dyn Stream<Item = Option<Self::Action>>>> {
         debug!("EFFECT: {:?}, CURRENT STATE: {:?}", effect, self);
-        match self {
-            Mode::Command(state) => match effect {
-                Effect::Print => {
-                    let state = state.clone();
-                    let strm = async {
-                        if let Some(mut writer) = state.output_writer{
-                            let mut buff = vec![];
-                            state.rope.write_to(&mut buff).unwrap();
-                            writer.send(buff).await.unwrap();
-                        }
-                        None
-                    }.into_stream();
-
-                    Box::pin(strm)
-                }
-            },
-            _ => Box::pin(stream::empty()),
-        }
+        Box::pin(stream::empty())
     }
 }

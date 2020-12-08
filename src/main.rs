@@ -113,19 +113,6 @@ async fn map_line_to_action(
                 Key::Char(':') => Some((Some(Action::ChangeToCommandMode), None, handle)),
                 _ => None,
             }
-            //            if QUIT.is_match(&line) {
-            //                Some((Some(Action::Quit), None, handle))
-            //            } else if APPEND.is_match(&line) {
-            //                Some((
-            //                    Some(Action::StartAppendingInput(LineNumber(state.current_line))),
-            //                    None,
-            //                    handle,
-            //                ))
-            //            } else if PRINT.is_match(&line) {
-            //                Some((None, Some(Effect::Print), handle))
-            //            } else {
-            //                None
-            //            }
         }
         Mode::Command(sofar) => {
             match key {
@@ -136,7 +123,6 @@ async fn map_line_to_action(
                         return dispatch_action(Action::Quit);
                     }
                     dispatch_action(Action::ChangeToNormalMode)
-                    //Some((Some(Action::ChangeToNormalMode), None, handle))
                 }
                 Key::Char(c) => dispatch_action(Action::AddChar(c.into())),
                 _ => None,
@@ -149,11 +135,6 @@ async fn map_line_to_action(
                 Key::Esc => dispatch_action(Action::ChangeToNormalMode),
                 _ => None,
             }
-            //            if PUNKT.is_match(&line) {
-            //                Some((Some(Action::ChangeToNormalMode), None, handle))
-            //            } else {
-            //                Some((Some(Action::AddInputLine(line)), None, handle))
-            //            }
         }
         _ => None,
     }

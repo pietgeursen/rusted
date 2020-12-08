@@ -38,12 +38,6 @@ pub struct State {
     pub rope: Rope,
 }
 
-impl State {
-    pub fn get_entire_rope(&self) -> String {
-        self.rope.chunks().collect()
-    }
-}
-
 impl InuState for State {
     type Action = Action;
     type Effect = Effect;

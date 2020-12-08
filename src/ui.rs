@@ -51,8 +51,12 @@ fn draw_text_input<B>(f: &mut Frame<B>, area: Rect, state: &State)
 where
     B: Backend,
 {
-    let text: String = state.get_entire_rope();
-    let text_spans = vec![Spans::from(text)];
+    let text_spans: Vec<_> = state
+        .rope
+        .lines()
+        .filter_map(|line| line.as_str())
+        .map(Spans::from)
+        .collect(); 
 
     let block = Block::default().borders(Borders::ALL);
 

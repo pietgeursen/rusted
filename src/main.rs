@@ -93,16 +93,20 @@ async fn map_line_to_action(
     trace!("INPUT LINE: {:?}", key);
     let state = handle.get_state().await;
 
+    let dispatch_action = |action: Action| -> Option<(Option<Action>, Option<Effect>, Handle<State>)> {
+        Some((Some(action), None, handle.clone()))
+    };
+
     match state.mode {
         Mode::Normal => {
             match key {
                 Key::Char('a') => Some((
-                    Some(Action::StartAppendingInput(LineNumber(state.current_line))),
+                    Some(Action::StartAppendingInput),
                     None,
                     handle,
                 )),
                 Key::Char('i') => Some((
-                    Some(Action::StartInsertingInput(LineNumber(state.current_line))),
+                    Some(Action::StartInsertingInput),
                     None,
                     handle,
                 )),
@@ -129,18 +133,20 @@ async fn map_line_to_action(
                 Key::Char('\n') => {
                     //TODO
                     if QUIT.is_match(&sofar) {
-                        return Some((Some(Action::Quit), None, handle));
+                        return dispatch_action(Action::Quit);
                     }
-                    Some((Some(Action::ChangeToNormalMode), None, handle))
+                    dispatch_action(Action::ChangeToNormalMode)
+                    //Some((Some(Action::ChangeToNormalMode), None, handle))
                 }
-                Key::Char(c) => Some((Some(Action::AddChar(c.into())), None, handle)),
+                Key::Char(c) => dispatch_action(Action::AddChar(c.into())),
                 _ => None,
             }
         }
         Mode::Input => {
             match key {
-                Key::Char(c) => Some((Some(Action::AddChar(c.into())), None, handle)),
-                Key::Esc => Some((Some(Action::ChangeToNormalMode), None, handle)),
+                Key::Char('\n') => dispatch_action(Action::Enter),
+                Key::Char(c) => dispatch_action(Action::AddChar(c.into())),
+                Key::Esc => dispatch_action(Action::ChangeToNormalMode),
                 _ => None,
             }
             //            if PUNKT.is_match(&line) {

@@ -7,7 +7,7 @@ use std::pin::Pin;
 mod action;
 mod effect;
 
-pub use action::{Action, LineNumber};
+pub use action::Action;
 pub use effect::Effect;
 
 #[derive(Debug, Clone)]
@@ -20,16 +20,21 @@ pub enum Mode {
 }
 
 impl Default for Mode {
-    fn default() -> Self{
+    fn default() -> Self {
         Mode::Normal
     }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CursorPostion {
+    pub row: usize,
+    pub column: usize,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct State {
     pub mode: Mode,
-    pub current_line: usize,
-    pub current_cursor_indent: usize,
+    pub cursor_position: CursorPostion,
     pub rope: Rope,
 }
 
@@ -48,8 +53,7 @@ impl InuState for State {
 
         match &self.mode {
             Mode::Normal => match action {
-                Action::StartAppendingInput(line_number) => {
-                    self.current_line = line_number.0;
+                Action::StartAppendingInput => {
                     self.mode = Mode::Input;
                 }
                 Action::ChangeToCommandMode => {
@@ -59,10 +63,17 @@ impl InuState for State {
             },
             Mode::Input => match action {
                 Action::AddChar(chr) => {
-                    let idx =
-                        self.rope.line_to_char(self.current_line) + self.current_cursor_indent;
+                    let idx = self.rope.line_to_char(self.cursor_position.row)
+                        + self.cursor_position.column;
                     self.rope.insert(idx, &chr);
-                    self.current_cursor_indent += 1;
+                    self.cursor_position.column += 1;
+                }
+                Action::Enter => {
+                    let idx = self.rope.line_to_char(self.cursor_position.row)
+                        + self.cursor_position.column;
+                    self.rope.insert(idx, "\n");
+                    self.cursor_position.column = 0;
+                    self.cursor_position.row += 1;
                 }
                 Action::ChangeToNormalMode => {
                     //state.current_line += lines_to_add.num_lines;
